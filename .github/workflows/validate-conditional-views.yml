@@ -1,0 +1,88 @@
+name: Conditional binary views
+on:
+  push:
+    branches: [ci/conditional-binary-views]
+permissions:
+  contents: read
+jobs:
+  conditional-views:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      ARROW_BASELINE_SHA: f9eee02fd19564c12ae58999fba6ac731be80836
+      ARROW_SOURCE_FILE: cpp/src/arrow/compute/kernels/scalar_if_else.cc
+      ARROW_REGRESSION_FILTER: 'TestCaseWhenBinary/4.*:TestCaseWhenBinary/5.*:TestCoalesceBinary/4.*:TestCoalesceBinary/5.*:TestChooseBinary/4.*:TestChooseBinary/5.*:TestConditionalBinaryView/*.*'
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Prepare pristine implementation with regression tests
+        run: |
+          set -euo pipefail
+          mkdir -p ci-results
+          git fetch --no-tags --depth=1 origin "$ARROW_BASELINE_SHA"
+          git show "$ARROW_BASELINE_SHA:$ARROW_SOURCE_FILE" > "$ARROW_SOURCE_FILE"
+          git diff --exit-code "$ARROW_BASELINE_SHA" -- "$ARROW_SOURCE_FILE"
+          cmake -S cpp -B build-conditional \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_CXX_FLAGS_DEBUG='-O0 -g0' \
+            -DBUILD_WARNING_LEVEL=CHECKIN \
+            -DARROW_COMPUTE=ON -DARROW_BUILD_TESTS=ON \
+            -DARROW_BUILD_SHARED=ON -DARROW_BUILD_STATIC=OFF \
+            -DARROW_WITH_RE2=OFF -DARROW_WITH_UTF8PROC=OFF \
+            -DARROW_MIMALLOC=OFF -DARROW_JEMALLOC=OFF \
+            -DARROW_TESTING=ON 2>&1 | tee ci-results/configure.log
+      - name: Build baseline
+        run: |
+          set -euo pipefail
+          cmake --build build-conditional --target arrow-compute-scalar-if-else-test \
+            --parallel 2 2>&1 | tee ci-results/baseline-build.log
+      - name: Verify baseline rejects the new view cases
+        run: |
+          set -euo pipefail
+          set +e
+          build-conditional/debug/arrow-compute-scalar-if-else-test \
+            --gtest_filter="$ARROW_REGRESSION_FILTER" \
+            --gtest_output=xml:ci-results/baseline.xml > ci-results/baseline.log 2>&1
+          baseline_status=$?
+          set -e
+          cat ci-results/baseline.log
+          test "$baseline_status" -eq 1
+          python3 - <<'PY'
+          import xml.etree.ElementTree as ET
+          root = ET.parse('ci-results/baseline.xml').getroot()
+          cases = root.findall('.//testcase')
+          assert len(cases) == 16, len(cases)
+          for case in cases:
+              failures = case.findall('failure')
+              assert failures, (case.attrib, 'unexpected baseline pass')
+              text = '\n'.join((f.get('message', '') + '\n' + (f.text or '')) for f in failures)
+              assert 'NotImplemented' in text and 'no kernel matching input types' in text, (case.attrib, text)
+              assert case.find('skipped') is None
+          print('All 16 regression tests fail on the pristine baseline with NotImplemented.')
+          PY
+      - name: Build fixed implementation
+        run: |
+          set -euo pipefail
+          git show "HEAD:$ARROW_SOURCE_FILE" > "$ARROW_SOURCE_FILE"
+          cmake --build build-conditional --target arrow-compute-scalar-if-else-test \
+            --parallel 2 2>&1 | tee ci-results/fixed-build.log
+      - name: Run complete conditional compute test executable
+        run: |
+          set -euo pipefail
+          build-conditional/debug/arrow-compute-scalar-if-else-test \
+            --gtest_output=xml:ci-results/fixed.xml 2>&1 | tee ci-results/fixed.log
+          git diff --check "$ARROW_BASELINE_SHA" -- "$ARROW_SOURCE_FILE" cpp/src/arrow/compute/kernels/scalar_if_else_test.cc
+          git hash-object cpp/src/arrow/compute/kernels/scalar_if_else.cc
+          git hash-object cpp/src/arrow/compute/kernels/scalar_if_else_test.cc
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        if: always()
+        with:
+          name: conditional-views-results
+          path: ci-results/
+          retention-days: 7
+          if-no-files-found: warn
