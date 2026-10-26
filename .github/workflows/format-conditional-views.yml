@@ -1,0 +1,22 @@
+name: Format conditional binary views
+on:
+  push:
+    branches: [ci/format-conditional-binary-views]
+permissions:
+  contents: read
+jobs:
+  format:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          persist-credentials: false
+      - name: Format only the contribution's changed lines
+        run: |
+          python3 -m pip install clang-format==18.1.8
+          git fetch --no-tags --depth=1 origin f9eee02fd19564c12ae58999fba6ac731be80836
+          clang-format --version
+          git-clang-format --binary clang-format f9eee02fd19564c12ae58999fba6ac731be80836 -- cpp/src/arrow/compute/kernels/scalar_if_else.cc cpp/src/arrow/compute/kernels/scalar_if_else_test.cc
+          git diff -- cpp/src/arrow/compute/kernels/scalar_if_else.cc cpp/src/arrow/compute/kernels/scalar_if_else_test.cc
+          git hash-object cpp/src/arrow/compute/kernels/scalar_if_else.cc cpp/src/arrow/compute/kernels/scalar_if_else_test.cc
